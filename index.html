@@ -59,7 +59,7 @@ a{color:#9cf}
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
 <script type="module">
-import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.1/+esm";
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm";
 
 const PAL = [[232,120,48],[80,180,220],[120,200,120],[220,90,120],[180,150,255],[255,200,80],[90,220,190],[220,180,140]];
 function pal(i){ return PAL[(i||0)%PAL.length]; }
@@ -312,7 +312,8 @@ async function fitBasin(name){
   await redraw();
 }
 
-map.once("load", () => { boot().catch(e => { st(String(e)); console.error(e); }); });
+boot().catch(e => { st(String(e)); console.error(e); });
+map.once("load", () => { attachDeck(); if (ready) redraw(); });
 map.on("style.load", () => { attachDeck(); if (ready) redraw(); });
 map.on("moveend", () => { if (ready) redraw(); });
 map.on("zoomend", () => { if (ready) redraw(); });
