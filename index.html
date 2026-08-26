@@ -110,6 +110,11 @@ map.on("error", e => {
 });
 
 let deckgl = null, conn = null, ready = false, tq = null, popup = null, basinIdx = {};
+let redrawing = false, dirty = false;
+function zOf(d){
+  const dep = Number(d.depth_ft);
+  return (Number.isFinite(dep) && dep > 0) ? -dep * 0.3048 * vex() : 0;
+}
 function st(t){ document.getElementById("stats").textContent = t; }
 function bar(p){ document.getElementById("fill").style.width = (100*Math.max(0,Math.min(1,p)))+"%"; }
 
@@ -180,6 +185,9 @@ function where(){
 
 async function redraw(){
   if (!ready || !deckgl) return;
+  if (redrawing) { dirty = true; return; }
+  redrawing = true;
+  try {
   const {sql, z, r, basin} = where();
   const t = Math.max(0, Math.min(1, (z-3.5)/6.5));
   const t0 = performance.now();
@@ -241,13 +249,21 @@ async function redraw(){
         radiusMaxPixels: raw ? 6+t*6 : 16+t*10,
         pickable: true, updateTriggers: {getFillColor:[t,mode], getRadius:[t,mode]}
       }),
-      new deck.PathLayer({
-        id: "bores", data: lines,
-        getPath: wellPath,
-        getColor: d => { const c = pal(basinIdx[d.basin]||0); return [c[0],c[1],c[2], 200]; },
-        getWidth: 12, widthMinPixels: 1.6, widthMaxPixels: 6,
-        capRounded: true, jointRounded: true, billboard: false,
-        pickable: true, updateTriggers: {getPath: vex()}
+      new deck.LineLayer({
+        id: "drop", data: lines,
+        getSourcePosition: d => [Number(d.lon), Number(d.lat), 0],
+        getTargetPosition: d => [Number(d.lon), Number(d.lat), zOf(d)],
+        getColor: d => { const c = pal(basinIdx[d.basin]||0); return [c[0],c[1],c[2], 220]; },
+        getWidth: 10, widthMinPixels: 1.5, widthMaxPixels: 5,
+        pickable: true, updateTriggers: {getTargetPosition: vex()}
+      }),
+      new deck.LineLayer({
+        id: "lat3", data: lines.filter(d => d.blat!=null && d.blon!=null),
+        getSourcePosition: d => [Number(d.lon), Number(d.lat), zOf(d)],
+        getTargetPosition: d => [Number(d.blon), Number(d.blat), zOf(d)],
+        getColor: d => { const c = pal(basinIdx[d.basin]||0); return [c[0],c[1],c[2], 240]; },
+        getWidth: 14, widthMinPixels: 2, widthMaxPixels: 7,
+        pickable: true, updateTriggers: {getSourcePosition: vex(), getTargetPosition: vex()}
       }),
       new deck.TextLayer({
         id: "lab", data: (raw && t>0.55) ? wells.slice(0, 400) : [],
@@ -261,6 +277,10 @@ async function redraw(){
     ]
   });
   syncDeck();
+  } finally {
+    redrawing = false;
+    if (dirty) { dirty = false; redraw(); }
+  }
 }
 
 async function boot(){
