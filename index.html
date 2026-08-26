@@ -64,7 +64,7 @@ a{color:#9cf}
     <label>stick <span id="vxl">0.25×</span> <input id="vex" type="range" min="0.08" max="1.2" step="0.02" value="0.25"/></label>
   </div>
   <div id="list"></div>
-  <div class="n hint">parquet · duckdb-wasm · SH ↓ TVD → BH</div>
+  <div class="n hint">xor lod · arrow ipc · SH ↓ TVD → BH</div>
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
@@ -76,6 +76,11 @@ function hash32(s){
   s = String(s||"");
   for (let i=0;i<s.length;i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return h >>> 0;
+}
+function mix32(x){
+  x = Math.imul(x ^ (x >>> 16), 2246822519);
+  x = Math.imul(x ^ (x >>> 13), 3266489917);
+  return (x ^ (x >>> 16)) >>> 0;
 }
 function opRgb(name){
   const key = String(name||"").trim().toUpperCase() || "?";
@@ -109,15 +114,31 @@ function res(z){
   const r = 2.15 * Math.pow(2, -(z - 3.05));
   return Math.min(2.2, Math.max(0.0045, r));
 }
-function resQ(r){
-  return Math.pow(2, Math.round(Math.log2(r) * 7) / 7);
+const LOD_R = [2, 1, 0.5, 0.25, 0.125, 0.0625];
+let lodEHeld = 0, lodWells = false, hasLod = false, lastXor = 0;
+let lastWells = [], lastLines = [], lastMode = "cells";
+function pickLodE(z){
+  const t = res(z);
+  let best = 0, bd = Infinity;
+  for (let i=0;i<LOD_R.length;i++){
+    const d = Math.abs(Math.log2(LOD_R[i]/t));
+    if (d < bd){ bd = d; best = i; }
+  }
+  if (best === lodEHeld) return lodEHeld;
+  const mid = Math.sqrt(LOD_R[lodEHeld]*LOD_R[best]);
+  if (best > lodEHeld && t > mid/1.15) return lodEHeld;
+  if (best < lodEHeld && t < mid*1.15) return lodEHeld;
+  lodEHeld = best;
+  return lodEHeld;
 }
-let lodWells = false;
 function wantWells(z){
   if (lodWells) return z >= 7.55;
   return z >= 8.35;
 }
-const SCORE = "coalesce(day,0)*1e6 + coalesce(lateral_ft,0)";
+function pinId(d){
+  if (d.ix != null && d.iy != null) return "c"+d.ix+":"+d.iy;
+  return "w"+(d.api||"")+":"+d.lat+":"+d.lon;
+}
 const FALLBACK = {version:8, sources:{}, layers:[{id:"bg", type:"background", paint:{"background-color":"#111"}}]};
 
 const map = new maplibregl.Map({
@@ -126,6 +147,7 @@ const map = new maplibregl.Map({
   center: [-104, 42], zoom: 3.3, pitch: 0, maxPitch: 80,
   dragRotate: true, touchPitch: true, attributionControl: true
 });
+globalThis.__map = map;
 map.addControl(new maplibregl.NavigationControl({visualizePitch: true}), "top-right");
 map.on("error", e => {
   if (e.error && !map.isStyleLoaded()) map.setStyle(FALLBACK);
@@ -191,73 +213,46 @@ map.on("click", ev => {
     openBox(info.object, [info.coordinate[0], info.coordinate[1]]);
 });
 
-function where(){
+function bboxSql(r){
   const b = map.getBounds();
-  const z = map.getZoom();
-  const r = resQ(res(z));
   const pad = r * 1.4;
-  const parts = [
-    `lat BETWEEN ${b.getSouth()-pad} AND ${b.getNorth()+pad}`,
-    `lon BETWEEN ${b.getWest()-pad} AND ${b.getEast()+pad}`,
-  ];
+  return `lat BETWEEN ${b.getSouth()-pad} AND ${b.getNorth()+pad} AND lon BETWEEN ${b.getWest()-pad} AND ${b.getEast()+pad}`;
+}
+function cellBox(r){
+  const b = map.getBounds();
+  const pad = 2;
+  const iy0 = Math.round(b.getSouth()/r) - pad, iy1 = Math.round(b.getNorth()/r) + pad;
+  const ix0 = Math.round(b.getWest()/r) - pad, ix1 = Math.round(b.getEast()/r) + pad;
+  return `iy BETWEEN ${iy0} AND ${iy1} AND ix BETWEEN ${ix0} AND ${ix1}`;
+}
+function where(){
+  const z = map.getZoom();
+  const e = pickLodE(z);
+  const r = LOD_R[e];
   const basin = ident(document.getElementById("basin").value);
-  if (basin) parts.push(`basin = '${basin}'`);
   const q = document.getElementById("q").value.replace(/'/g,"").toLowerCase().slice(0,80);
+  const parts = [bboxSql(r)];
+  if (basin) parts.push(`basin = '${basin}'`);
   if (q) parts.push(`(lower(coalesce(operator,'')) LIKE '%${q}%' OR lower(coalesce(well,'')) LIKE '%${q}%' OR lower(coalesce(api,'')) LIKE '%${q}%')`);
-  return {sql: parts.join(" AND "), z, r, basin};
+  return {sql: parts.join(" AND "), z, r, e, basin, q};
+}
+function viewKey(w){
+  const b = map.getBounds();
+  const wells = w.lodWells ? 1 : 0;
+  const pitch3 = map.getPitch() > 8 ? 1 : 0;
+  const qn = v => Math.round(v / (wells ? Math.max(0.02, w.r*0.35) : w.r));
+  let x = 2166136261;
+  const parts = [qn(b.getSouth()), qn(b.getNorth()), qn(b.getWest()), qn(b.getEast()),
+    w.e, wells, pitch3, hash32(w.basin), hash32(w.q)];
+  for (const p of parts) x ^= p >>> 0;
+  return mix32(x);
 }
 
-async function redraw(){
-  if (!ready || !deckgl) return;
-  if (redrawing) { dirty = true; return; }
-  redrawing = true;
-  try {
-  const {sql, z, r, basin} = where();
-  lodWells = wantWells(z);
+function paint(wells, lines, mode, tag){
+  if (!deckgl) return;
+  const z = map.getZoom();
+  const r = res(z);
   const t = Math.max(0, Math.min(1, (z-3.5)/6.5));
-  const t0 = performance.now();
-  let wells = [], lines = [], mode = "cells";
-  if (lodWells) {
-    mode = "wells";
-    const [w, L] = await Promise.all([
-      conn.query(`SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
-                         lat, lon, blat, blon, depth_ft, lateral_ft, basin, 1 AS n
-                  FROM permits WHERE ${sql} ORDER BY day DESC NULLS LAST LIMIT 12000`),
-      conn.query(`SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
-                         lat, lon, blat, blon, depth_ft, lateral_ft, basin, 1 AS n
-                  FROM permits WHERE ${sql}
-                    AND blat IS NOT NULL AND blon IS NOT NULL
-                    AND abs(blat-lat)+abs(blon-lon) > 1e-4
-                  ORDER BY day DESC NULLS LAST LIMIT 1800`),
-    ]);
-    wells = w.toArray();
-    lines = L.toArray();
-  } else {
-    const [c, L] = await Promise.all([
-      conn.query(`SELECT count(*)::INT AS n,
-        arg_max(api, ${SCORE}) AS api, arg_max(operator, ${SCORE}) AS operator,
-        arg_max(well, ${SCORE}) AS well, arg_max(permit_type, ${SCORE}) AS permit_type,
-        arg_max(well_type, ${SCORE}) AS well_type, arg_max(traj, ${SCORE}) AS traj,
-        arg_max(formation, ${SCORE}) AS formation, arg_max(county, ${SCORE}) AS county,
-        arg_max(state, ${SCORE}) AS state, arg_max(lat, ${SCORE}) AS lat,
-        arg_max(lon, ${SCORE}) AS lon, arg_max(blat, ${SCORE}) AS blat,
-        arg_max(blon, ${SCORE}) AS blon, arg_max(depth_ft, ${SCORE}) AS depth_ft,
-        arg_max(lateral_ft, ${SCORE}) AS lateral_ft, arg_max(basin, ${SCORE}) AS basin
-        FROM permits WHERE ${sql}
-        GROUP BY round(lat/${r})*${r}, round(lon/${r})*${r}
-        ORDER BY n DESC LIMIT 6000`),
-      conn.query(`SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
-                         lat, lon, blat, blon, depth_ft, lateral_ft, basin, 1 AS n
-                  FROM permits WHERE ${sql}
-                    AND blat IS NOT NULL AND blon IS NOT NULL
-                    AND abs(blat-lat)+abs(blon-lon) > 1e-4
-                  ORDER BY day DESC NULLS LAST LIMIT ${Math.round(280 + Math.min(1400, Math.pow(2, z-3.2)*55))}`),
-    ]);
-    wells = c.toArray();
-    lines = L.toArray();
-  }
-  const ms = (performance.now()-t0).toFixed(0);
-  st(`${mode}  ·  ${wells.length.toLocaleString()} pts  ·  ${lines.length} laterals  ·  ${ms}ms sql  ·  z ${z.toFixed(1)}`);
   const raw = mode === "wells";
   deckgl.setProps({
     layers: [
@@ -277,8 +272,8 @@ async function redraw(){
         radiusMaxPixels: raw ? 5+t*3.5 : 22,
         antialiasing: true,
         pickable: true,
-        transitions: {getRadius: 280, getFillColor: 200, getPosition: 360},
-        updateTriggers: {getFillColor:[t,mode], getRadius:[t,mode,r]}
+        transitions: {getFillColor: 160},
+        updateTriggers: {getFillColor:[t,mode], getRadius:[t,mode,r,z.toFixed(2)]}
       }),
       new deck.LineLayer({
         id: "drop", data: lines,
@@ -310,6 +305,91 @@ async function redraw(){
     ]
   });
   syncDeck();
+  if (tag && tag.held)
+    st(`${mode}  ·  ${wells.length.toLocaleString()} pts  ·  ${lines.length} laterals  ·  xor-hold  ·  z ${z.toFixed(1)}`);
+}
+
+async function redraw(){
+  if (!ready || !deckgl) return;
+  if (redrawing) { dirty = true; return; }
+  const w = where();
+  lodWells = wantWells(w.z);
+  w.lodWells = lodWells;
+  const vk = viewKey(w);
+  if (vk === lastXor && lastWells.length) {
+    paint(lastWells, lastLines, lastMode, {held:true});
+    return;
+  }
+  redrawing = true;
+  try {
+  const {sql, z, r, e, basin, q} = w;
+  const t0 = performance.now();
+  let wells = [], lines = [], mode = "cells";
+  const wantLat = lodWells || map.getPitch() > 8;
+  const latLim = lodWells ? 1800 : Math.round(280 + Math.min(1400, Math.pow(2, z-3.2)*55));
+  const latSql = wantLat
+    ? conn.query(`SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
+                         lat, lon, blat, blon, depth_ft, lateral_ft, basin, 1 AS n
+                  FROM permits WHERE ${sql}
+                    AND blat IS NOT NULL AND blon IS NOT NULL
+                    AND abs(blat-lat)+abs(blon-lon) > 1e-4
+                  ORDER BY day DESC NULLS LAST LIMIT ${latLim}`)
+    : null;
+  if (lodWells || q) {
+    mode = "wells";
+    const wq = await conn.query(`SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
+                         lat, lon, blat, blon, depth_ft, lateral_ft, basin, 1 AS n
+                  FROM permits WHERE ${sql} ORDER BY day DESC NULLS LAST LIMIT 12000`);
+    wells = wq.toArray();
+  } else if (hasLod) {
+    const lodQ = basin
+      ? `SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
+                lat, lon, blat, blon, depth_ft, lateral_ft, basin, n, ix, iy, xor_id
+         FROM lod WHERE r_e = ${e} AND ${cellBox(r)} AND basin = '${basin}'
+         ORDER BY n DESC LIMIT 6000`
+      : `SELECT arg_min(api, xor_id) AS api, arg_min(operator, xor_id) AS operator,
+                arg_min(well, xor_id) AS well, arg_min(permit_type, xor_id) AS permit_type,
+                arg_min(well_type, xor_id) AS well_type, arg_min(traj, xor_id) AS traj,
+                arg_min(formation, xor_id) AS formation, arg_min(county, xor_id) AS county,
+                arg_min(state, xor_id) AS state, arg_min(lat, xor_id) AS lat,
+                arg_min(lon, xor_id) AS lon, arg_min(blat, xor_id) AS blat,
+                arg_min(blon, xor_id) AS blon, arg_min(depth_ft, xor_id) AS depth_ft,
+                arg_min(lateral_ft, xor_id) AS lateral_ft, arg_min(basin, xor_id) AS basin,
+                sum(n)::INT AS n, ix, iy
+         FROM lod WHERE r_e = ${e} AND ${cellBox(r)}
+         GROUP BY ix, iy
+         ORDER BY n DESC LIMIT 6000`;
+    wells = (await conn.query(lodQ)).toArray();
+  } else {
+    wells = (await conn.query(`SELECT count(*)::INT AS n,
+        arg_min(api, hash(coalesce(api,''))) AS api,
+        arg_min(operator, hash(coalesce(api,''))) AS operator,
+        arg_min(well, hash(coalesce(api,''))) AS well,
+        arg_min(permit_type, hash(coalesce(api,''))) AS permit_type,
+        arg_min(well_type, hash(coalesce(api,''))) AS well_type,
+        arg_min(traj, hash(coalesce(api,''))) AS traj,
+        arg_min(formation, hash(coalesce(api,''))) AS formation,
+        arg_min(county, hash(coalesce(api,''))) AS county,
+        arg_min(state, hash(coalesce(api,''))) AS state,
+        arg_min(lat, hash(coalesce(api,''))) AS lat,
+        arg_min(lon, hash(coalesce(api,''))) AS lon,
+        arg_min(blat, hash(coalesce(api,''))) AS blat,
+        arg_min(blon, hash(coalesce(api,''))) AS blon,
+        arg_min(depth_ft, hash(coalesce(api,''))) AS depth_ft,
+        arg_min(lateral_ft, hash(coalesce(api,''))) AS lateral_ft,
+        arg_min(basin, hash(coalesce(api,''))) AS basin,
+        CAST(round(lon/${r}) AS INTEGER) AS ix,
+        CAST(round(lat/${r}) AS INTEGER) AS iy
+        FROM permits WHERE ${sql}
+        GROUP BY ix, iy
+        ORDER BY n DESC LIMIT 6000`)).toArray();
+  }
+  if (latSql) lines = (await latSql).toArray();
+  const ms = (performance.now()-t0).toFixed(0);
+  lastWells = wells; lastLines = lines; lastMode = mode; lastXor = vk;
+  globalThis.__atlas = {wells, mode, xor: vk, ms: Number(ms), hasLod};
+  st(`${mode}  ·  ${wells.length.toLocaleString()} pts  ·  ${lines.length} laterals  ·  ${ms}ms  ·  z ${z.toFixed(1)}`);
+  paint(wells, lines, mode);
   } finally {
     redrawing = false;
     if (dirty) { dirty = false; redraw(); }
@@ -319,6 +399,7 @@ async function redraw(){
 async function boot(){
   attachDeck();
   st("fetch permits.zstd.parquet…");
+  const lodFetch = fetch("lod.zstd.parquet");
   const bundles = duckdb.getJsDelivrBundles();
   const bundle = await duckdb.selectBundle(bundles);
   const worker = new Worker(URL.createObjectURL(new Blob(
@@ -352,6 +433,21 @@ async function boot(){
            lat_i * 1e-7 AS lat, lon_i * 1e-7 AS lon,
            blat_i * 1e-7 AS blat, blon_i * 1e-7 AS blon
     FROM read_parquet('permits.parquet')`);
+  try {
+    const lr = await lodFetch;
+    if (lr.ok) {
+      const lb = new Uint8Array(await lr.arrayBuffer());
+      await db.registerFileBuffer("lod.parquet", lb);
+      await conn.query(`
+        CREATE VIEW lod AS
+        SELECT r_e, iy, ix, n, xor_id, xor_op, api, operator, well, permit_type, well_type,
+               traj, formation, county, state, basin, depth_ft, lateral_ft, day,
+               lat_i * 1e-7 AS lat, lon_i * 1e-7 AS lon,
+               blat_i * 1e-7 AS blat, blon_i * 1e-7 AS blon
+        FROM read_parquet('lod.parquet')`);
+      hasLod = true;
+    }
+  } catch (e) { hasLod = false; }
   const n = (await conn.query("SELECT count(*) AS n FROM permits")).toArray()[0].n;
   const basins = (await conn.query("SELECT basin, count(*)::INT n FROM permits GROUP BY 1 ORDER BY n DESC")).toArray();
   basins.forEach((b,i) => { basinIdx[b.basin] = i; });
@@ -366,7 +462,7 @@ async function boot(){
     d.onclick = async () => { sel.value = b.basin; await fitBasin(b.basin); };
     list.appendChild(d);
   });
-  st(Number(n).toLocaleString()+" rows  ·  "+(buf.byteLength/1e6).toFixed(1)+" MB parquet  ·  wasm");
+  st(Number(n).toLocaleString()+" rows  ·  "+(buf.byteLength/1e6).toFixed(1)+" MB"+(hasLod?"  ·  xor lod":"")+"  ·  wasm");
   ready = true;
   await redraw();
 }
@@ -400,11 +496,9 @@ function scheduleQuery(){
 }
 map.on("moveend", scheduleQuery);
 map.on("zoomend", scheduleQuery);
-let zqMove = 0;
 map.on("zoom", () => {
-  if (!ready) return;
-  clearTimeout(zqMove);
-  zqMove = setTimeout(scheduleQuery, 70);
+  syncDeck();
+  if (ready && lastWells.length) paint(lastWells, lastLines, lastMode);
 });
 
 document.getElementById("basin").onchange = () => {
@@ -420,7 +514,7 @@ document.getElementById("btn3d").onclick = () => {
 };
 document.getElementById("vex").oninput = () => {
   document.getElementById("vxl").textContent = vex().toFixed(2)+"×";
-  if (ready) redraw();
+  if (ready && lastWells.length) paint(lastWells, lastLines, lastMode);
 };
 const ui = document.getElementById("ui");
 const tog = document.getElementById("tog");
