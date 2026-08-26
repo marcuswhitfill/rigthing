@@ -16,6 +16,11 @@ html,body{margin:0;height:100%;height:100dvh;background:#111;color:#ddd;font:12p
 #head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 #ui .n{color:#aaa;margin:4px 0 8px}
 select,input{width:100%;background:#1a1a1a;color:#ddd;border:1px solid #444;padding:4px;margin:3px 0;box-sizing:border-box}
+#row3d{display:flex;gap:8px;align-items:center;margin:4px 0}
+#btn3d{background:#1a1a1a;color:#ddd;border:1px solid #444;padding:6px 10px;min-height:32px;font:12px ui-monospace,Consolas,monospace}
+#btn3d.on{border-color:#e07830;color:#ffb060}
+#row3d label{flex:1;display:flex;align-items:center;gap:6px;color:#888}
+#row3d input[type=range]{flex:1;min-height:24px;margin:0}
 #list{max-height:42vh;overflow:auto;margin-top:6px;-webkit-overflow-scrolling:touch}
 #list div{display:flex;justify-content:space-between;cursor:pointer;padding:2px 0;border-bottom:1px solid #222}
 #list div:hover{color:#fff}
@@ -53,8 +58,12 @@ a{color:#9cf}
   <div class="n" id="stats">loading duckdb-wasm…</div>
   <input id="q" placeholder="operator / well / API" enterkeyhint="search" autocomplete="off"/>
   <select id="basin"><option value="">all basins</option></select>
+  <div id="row3d">
+    <button type="button" id="btn3d">3D</button>
+    <label>exag <input id="vex" type="range" min="1" max="15" value="5"/></label>
+  </div>
   <div id="list"></div>
-  <div class="n hint">parquet · duckdb-wasm · viewport SQL</div>
+  <div class="n hint">parquet · duckdb-wasm · SH ↓ TVD → BH</div>
 </div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
@@ -65,6 +74,16 @@ const PAL = [[232,120,48],[80,180,220],[120,200,120],[220,90,120],[180,150,255],
 function pal(i){ return PAL[(i||0)%PAL.length]; }
 function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function ident(s){ return /^[A-Za-z0-9 _./&+-]{0,80}$/.test(s||"") ? (s||"") : ""; }
+function vex(){ return Number(document.getElementById("vex")?.value || 5); }
+function wellPath(d){
+  const lon = Number(d.lon), lat = Number(d.lat);
+  const dep = Number(d.depth_ft);
+  const z = (Number.isFinite(dep) && dep > 0) ? -dep * 0.3048 * vex() : 0;
+  const hasBh = d.blat != null && d.blon != null &&
+    Math.abs(Number(d.blat)-lat)+Math.abs(Number(d.blon)-lon) > 1e-4;
+  if (!hasBh) return [[lon, lat, 0], [lon, lat, z]];
+  return [[lon, lat, 0], [lon, lat, z], [Number(d.blon), Number(d.blat), z]];
+}
 function res(z){
   if (z<4) return 2;
   if (z<5) return 1;
@@ -82,8 +101,10 @@ const FALLBACK = {version:8, sources:{}, layers:[{id:"bg", type:"background", pa
 const map = new maplibregl.Map({
   container: "map",
   style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-  center: [-104, 42], zoom: 3.3, attributionControl: true
+  center: [-104, 42], zoom: 3.3, pitch: 0, maxPitch: 80,
+  dragRotate: true, touchPitch: true, attributionControl: true
 });
+map.addControl(new maplibregl.NavigationControl({visualizePitch: true}), "top-right");
 map.on("error", e => {
   if (e.error && !map.isStyleLoaded()) map.setStyle(FALLBACK);
 });
@@ -98,7 +119,8 @@ function syncDeck(){
   deckgl.setProps({
     viewState: {
       longitude: c.lng, latitude: c.lat, zoom: map.getZoom(),
-      bearing: map.getBearing(), pitch: map.getPitch()
+      bearing: map.getBearing(), pitch: map.getPitch(),
+      maxPitch: 80, position: [0, 0, 0]
     }
   });
 }
@@ -107,7 +129,7 @@ function attachDeck(){
   deckgl = new deck.Deck({
     parent: map.getContainer(),
     style: {position:"absolute", left:"0", top:"0", width:"100%", height:"100%", pointerEvents:"none"},
-    views: [new deck.MapView({repeat:true})],
+    views: [new deck.MapView({repeat:true, farZMultiplier: 2.8})],
     controller: false, useDevicePixels: true, layers: []
   });
   syncDeck();
@@ -208,7 +230,7 @@ async function redraw(){
     layers: [
       new deck.ScatterplotLayer({
         id: "wells", data: wells,
-        getPosition: d => [Number(d.lon), Number(d.lat)],
+        getPosition: d => [Number(d.lon), Number(d.lat), 0],
         getFillColor: d => {
           const c = pal(basinIdx[d.basin]||0);
           const a = raw ? Math.round(90+t*140) : Math.round(30+t*80+Math.min(50, Math.log10(Number(d.n||1)+1)*16));
@@ -219,18 +241,18 @@ async function redraw(){
         radiusMaxPixels: raw ? 6+t*6 : 16+t*10,
         pickable: true, updateTriggers: {getFillColor:[t,mode], getRadius:[t,mode]}
       }),
-      new deck.LineLayer({
-        id: "lats", data: lines.filter(d => d.blat!=null),
-        getSourcePosition: d => [Number(d.lon), Number(d.lat)],
-        getTargetPosition: d => [Number(d.blon), Number(d.blat)],
-        getColor: d => { const c = pal(basinIdx[d.basin]||0); return [c[0],c[1],c[2], 180+t*70]; },
-        getWidth: 1+t*3, widthMinPixels: 1, widthMaxPixels: 7,
-        pickable: true
+      new deck.PathLayer({
+        id: "bores", data: lines,
+        getPath: wellPath,
+        getColor: d => { const c = pal(basinIdx[d.basin]||0); return [c[0],c[1],c[2], 200]; },
+        getWidth: 12, widthMinPixels: 1.6, widthMaxPixels: 6,
+        capRounded: true, jointRounded: true, billboard: false,
+        pickable: true, updateTriggers: {getPath: vex()}
       }),
       new deck.TextLayer({
         id: "lab", data: (raw && t>0.55) ? wells.slice(0, 400) : [],
         getText: d => d.api || d.well || "",
-        getPosition: d => [Number(d.lon), Number(d.lat)],
+        getPosition: d => [Number(d.lon), Number(d.lat), 0],
         getSize: 11, sizeUnits: "pixels",
         getColor: [255,224,170,200], getPixelOffset: [0,-14],
         fontFamily: "Consolas, ui-monospace, monospace",
@@ -323,6 +345,13 @@ document.getElementById("basin").onchange = () => {
   if (v) fitBasin(v); else redraw();
 };
 document.getElementById("q").oninput = () => { clearTimeout(tq); tq = setTimeout(() => redraw(), 140); };
+let three = false;
+document.getElementById("btn3d").onclick = () => {
+  three = !three;
+  document.getElementById("btn3d").classList.toggle("on", three);
+  map.easeTo({pitch: three ? 58 : 0, bearing: three ? -22 : 0, duration: 600});
+};
+document.getElementById("vex").oninput = () => { if (ready) redraw(); };
 const ui = document.getElementById("ui");
 const tog = document.getElementById("tog");
 function setOpen(open){
