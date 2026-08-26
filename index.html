@@ -348,7 +348,9 @@ async function fitBasin(name){
     const phone = window.matchMedia("(max-width:720px)").matches;
     map.fitBounds([[x.c,x.a],[x.d,x.b]], {
       padding: phone ? {top:12,left:12,right:12,bottom:Math.round(h+12)} : 40,
-      maxZoom: 8
+      maxZoom: 8,
+      pitch: map.getPitch(),
+      bearing: map.getBearing()
     });
   }
   await redraw();
