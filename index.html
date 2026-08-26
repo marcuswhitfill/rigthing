@@ -99,7 +99,7 @@ function vex(){ return Number(document.getElementById("vex")?.value || 0.25); }
 function wellPath(d){
   const lon = Number(d.lon), lat = Number(d.lat);
   const dep = Number(d.depth_ft);
-  const z = (Number.isFinite(dep) && dep > 0) ? dep * 0.3048 * vex() : 0;
+  const z = (Number.isFinite(dep) && dep > 0) ? -dep * 0.3048 * vex() : 0;
   const hasBh = d.blat != null && d.blon != null &&
     Math.abs(Number(d.blat)-lat)+Math.abs(Number(d.blon)-lon) > 1e-4;
   if (!hasBh) return [[lon, lat, 0], [lon, lat, z]];
@@ -135,7 +135,7 @@ let redrawing = false, dirty = false;
 function zOf(d){
   const dep = Number(d.depth_ft);
   if (!Number.isFinite(dep) || dep <= 0) return 0;
-  return dep * 0.3048 * vex();
+  return -dep * 0.3048 * vex();
 }
 function st(t){ document.getElementById("stats").textContent = t; }
 function bar(p){ document.getElementById("fill").style.width = (100*Math.max(0,Math.min(1,p)))+"%"; }
@@ -277,6 +277,7 @@ async function redraw(){
         getTargetPosition: d => [Number(d.lon), Number(d.lat), zOf(d)],
         getColor: d => { const c = opRgb(d.operator); return [c[0],c[1],c[2], 220]; },
         getWidth: 2, widthUnits: "pixels", widthMinPixels: 0.8, widthMaxPixels: 2.2,
+        parameters: {depthTest: false},
         pickable: true, updateTriggers: {getTargetPosition: vex()}
       }),
       new deck.LineLayer({
@@ -285,6 +286,7 @@ async function redraw(){
         getTargetPosition: d => [Number(d.blon), Number(d.blat), zOf(d)],
         getColor: d => { const c = opRgb(d.operator); return [c[0],c[1],c[2], 240]; },
         getWidth: 2.2, widthUnits: "pixels", widthMinPixels: 1, widthMaxPixels: 2.8,
+        parameters: {depthTest: false},
         pickable: true, updateTriggers: {getSourcePosition: vex(), getTargetPosition: vex()}
       }),
       new deck.TextLayer({
