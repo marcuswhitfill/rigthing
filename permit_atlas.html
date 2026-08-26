@@ -106,15 +106,16 @@ function wellPath(d){
   return [[lon, lat, 0], [lon, lat, z], [Number(d.blon), Number(d.blat), z]];
 }
 function res(z){
-  if (z<4) return 2;
-  if (z<5) return 1;
-  if (z<6) return 0.5;
-  if (z<7) return 0.25;
-  if (z<8) return 0.1;
-  if (z<9) return 0.05;
-  if (z<10) return 0.02;
-  if (z<11) return 0.008;
-  return 0;
+  const r = 2.15 * Math.pow(2, -(z - 3.05));
+  return Math.min(2.2, Math.max(0.0045, r));
+}
+function resQ(r){
+  return Math.pow(2, Math.round(Math.log2(r) * 7) / 7);
+}
+let lodWells = false;
+function wantWells(z){
+  if (lodWells) return z >= 7.55;
+  return z >= 8.35;
 }
 const SCORE = "coalesce(day,0)*1e6 + coalesce(lateral_ft,0)";
 const FALLBACK = {version:8, sources:{}, layers:[{id:"bg", type:"background", paint:{"background-color":"#111"}}]};
@@ -193,10 +194,11 @@ map.on("click", ev => {
 function where(){
   const b = map.getBounds();
   const z = map.getZoom();
-  const r = res(z) || 0.003;
+  const r = resQ(res(z));
+  const pad = r * 1.4;
   const parts = [
-    `lat BETWEEN ${b.getSouth()-r} AND ${b.getNorth()+r}`,
-    `lon BETWEEN ${b.getWest()-r} AND ${b.getEast()+r}`,
+    `lat BETWEEN ${b.getSouth()-pad} AND ${b.getNorth()+pad}`,
+    `lon BETWEEN ${b.getWest()-pad} AND ${b.getEast()+pad}`,
   ];
   const basin = ident(document.getElementById("basin").value);
   if (basin) parts.push(`basin = '${basin}'`);
@@ -211,10 +213,11 @@ async function redraw(){
   redrawing = true;
   try {
   const {sql, z, r, basin} = where();
+  lodWells = wantWells(z);
   const t = Math.max(0, Math.min(1, (z-3.5)/6.5));
   const t0 = performance.now();
   let wells = [], lines = [], mode = "cells";
-  if (z >= 8) {
+  if (lodWells) {
     mode = "wells";
     const [w, L] = await Promise.all([
       conn.query(`SELECT api, operator, well, permit_type, well_type, traj, formation, county, state,
@@ -248,7 +251,7 @@ async function redraw(){
                   FROM permits WHERE ${sql}
                     AND blat IS NOT NULL AND blon IS NOT NULL
                     AND abs(blat-lat)+abs(blon-lon) > 1e-4
-                  ORDER BY day DESC NULLS LAST LIMIT ${z < 6.5 ? 350 : z < 8 ? 800 : 1800}`),
+                  ORDER BY day DESC NULLS LAST LIMIT ${Math.round(280 + Math.min(1400, Math.pow(2, z-3.2)*55))}`),
     ]);
     wells = c.toArray();
     lines = L.toArray();
@@ -263,13 +266,19 @@ async function redraw(){
         getPosition: d => [Number(d.lon), Number(d.lat), 0],
         getFillColor: d => {
           const c = opRgb(d.operator);
-          const a = raw ? Math.round(90+t*140) : Math.round(30+t*80+Math.min(50, Math.log10(Number(d.n||1)+1)*16));
+          const a = raw ? Math.round(90+t*140) : Math.round(28+t*70+Math.min(48, Math.log10(Number(d.n||1)+1)*16));
           return [c[0], c[1], c[2], a];
         },
-        getRadius: d => raw ? (6+t*16) : (18 + Math.log10(Number(d.n||1)+1)*40 + t*30),
-        radiusMinPixels: raw ? 1.2+t*1.5 : 1+t,
-        radiusMaxPixels: raw ? 4+t*4 : 8+t*6,
-        pickable: true, updateTriggers: {getFillColor:[t,mode], getRadius:[t,mode]}
+        radiusUnits: raw ? "pixels" : "meters",
+        getRadius: d => raw
+          ? (5.5 + t*14)
+          : Math.max(90, r * 111320 * 0.38 * (0.55 + 0.45*Math.log10(Number(d.n||1)+1))),
+        radiusMinPixels: raw ? 1.15+t*1.2 : 0.9,
+        radiusMaxPixels: raw ? 5+t*3.5 : 22,
+        antialiasing: true,
+        pickable: true,
+        transitions: {getRadius: 280, getFillColor: 200, getPosition: 360},
+        updateTriggers: {getFillColor:[t,mode], getRadius:[t,mode,r]}
       }),
       new deck.LineLayer({
         id: "drop", data: lines,
@@ -383,8 +392,20 @@ async function fitBasin(name){
 boot().catch(e => { st(String(e)); console.error(e); });
 map.once("load", () => { attachDeck(); if (ready) redraw(); });
 map.on("style.load", () => { attachDeck(); if (ready) redraw(); });
-map.on("moveend", () => { if (ready) redraw(); });
-map.on("zoomend", () => { if (ready) redraw(); });
+let qraf = 0;
+function scheduleQuery(){
+  if (!ready) return;
+  if (qraf) return;
+  qraf = requestAnimationFrame(() => { qraf = 0; redraw(); });
+}
+map.on("moveend", scheduleQuery);
+map.on("zoomend", scheduleQuery);
+let zqMove = 0;
+map.on("zoom", () => {
+  if (!ready) return;
+  clearTimeout(zqMove);
+  zqMove = setTimeout(scheduleQuery, 70);
+});
 
 document.getElementById("basin").onchange = () => {
   const v = document.getElementById("basin").value;
@@ -395,7 +416,7 @@ let three = false;
 document.getElementById("btn3d").onclick = () => {
   three = !three;
   document.getElementById("btn3d").classList.toggle("on", three);
-  map.easeTo({pitch: three ? 58 : 0, bearing: three ? -22 : 0, duration: 600});
+  map.easeTo({pitch: three ? 58 : 0, bearing: three ? -22 : 0, duration: 780});
 };
 document.getElementById("vex").oninput = () => {
   document.getElementById("vxl").textContent = vex().toFixed(2)+"×";
