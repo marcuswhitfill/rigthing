@@ -312,17 +312,6 @@ async function fitBasin(name){
   await redraw();
 }
 
-function attachDeck(){
-  if (deckgl) { try { deckgl.finalize(); } catch(e) {} deckgl = null; }
-  deckgl = new deck.Deck({
-    parent: map.getContainer(),
-    style: {position:"absolute", left:"0", top:"0", width:"100%", height:"100%", pointerEvents:"none"},
-    views: [new deck.MapView({repeat:true})],
-    controller: false, useDevicePixels: true, layers: []
-  });
-  syncDeck();
-}
-
 map.once("load", () => { boot().catch(e => { st(String(e)); console.error(e); }); });
 map.on("style.load", () => { attachDeck(); if (ready) redraw(); });
 map.on("moveend", () => { if (ready) redraw(); });
