@@ -1,7 +1,8 @@
 ﻿# rigthing
 
-Live atlas (open on phone in Safari):
-
 **https://marcuswhitfill.github.io/rigthing/**
 
-One HTML. No parquet sidecar. Desktop inbox copy: `permit_atlas_mail.html`.
+DuckDB-wasm over `permits.zstd.parquet` (spatial zstd, viewport SQL).
+Open in Safari on a phone. First load pulls the parquet (~15 MB); pans are queries, not a 590k dump.
+
+Email one-file (no parquet): `permit_atlas_mail.html` in the local pipeline folder, not this site.
